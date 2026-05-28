@@ -1,3 +1,31 @@
+# Change Log
+
+
+
+## 2026-05-28
+
+### Changes
+
+---
+
+Packages with breaking changes:
+
+ - There are no breaking changes in this release.
+
+Packages with other changes:
+
+ - [`analytics_toolkit` - `v0.1.1`](#analytics_toolkit---v011)
+
+---
+
+#### `analytics_toolkit` - `v0.1.1`
+
+ - **FEAT**: Publishing initial version of analytics package ([#1](https://github.com/resengi/analytics_toolkit/issues/1)). ([c3f53193](https://github.com/resengi/analytics_toolkit/commit/c3f53193367a657e9eb42e2f7bad92f9d15cb790))
+
+## 0.1.1
+
+ - **FEAT**: Publishing initial version of analytics package ([#1](https://github.com/resengi/analytics_toolkit/issues/1)). ([c3f53193](https://github.com/resengi/analytics_toolkit/commit/c3f53193367a657e9eb42e2f7bad92f9d15cb790))
+
 # Changelog
 
 ## 0.1.0
@@ -17,4 +45,5 @@ This release establishes the foundational API surface:
 - **Paired queries** — `PairedQuerySpec` for cohort comparison and rate displays, with alignability validation across sources.
 - **Persistence** — `AnalyticsWidgetSpec` plus `WidgetPayloadCodec` round-trip user-built widget specs to JSON with a schema-version guard for forward compatibility.
 - **Caching and change events** — `SourceSnapshotCache` for records-layer caching (in-flight dedup, scoped invalidation, discard-on-completion for stale fetches) and `AnalyticsChange` / `AnalyticsChangeKind` for typed listener invalidation.
+- **Zero external dependencies** — only `dart:core` and `dart:convert`.nd `AnalyticsChange` / `AnalyticsChangeKind` for typed listener invalidation.
 - **Zero external dependencies** — only `dart:core` and `dart:convert`.
