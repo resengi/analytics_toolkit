@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
+    branches:
+      - main
+
+env:
+  GIT_CONFIG_COUNT: 2
+  GIT_CONFIG_KEY_0: safe.directory
+  GIT_CONFIG_VALUE_0: /usr/local/flutter
+  GIT_CONFIG_KEY_1: safe.directory
+  GIT_CONFIG_VALUE_1: /__w/analytics_toolkit/analytics_toolkit
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: "Version"
+    runs-on: ubuntu-latest
+    container: instrumentisto/flutter:latest
+
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ""
+
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.actor != 'resengi-release-bot[bot]'
+
+    outputs:
+      new_version: ${{ steps.capture.outputs.version }}
+      has_changes: ${{ steps.capture.outputs.has_changes }}
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Save original pubspec (for later restoration)
+        run: cp pubspec.yaml pubspec.yaml.orig
+
+      - name: Install Melos
+        run: |
+          dart pub global activate melos
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+          dart pub add melos --dev
+
+      - name: Inject Melos workspace config into pubspec.yaml
+        run: |
+          echo "" >> pubspec.yaml
+          echo "# --- MELOS CONFIG (injected at CI time) ---" >> pubspec.yaml
+          cat .github/melos.yaml >> pubspec.yaml
+
+      - name: Bootstrap
+        run: melos bootstrap
+
+      - name: Fetch tags
+        run: git fetch --tags
+
+      - name: Bump version (local files only — no git tag, no commit)
+        run: melos version --no-git-commit-version --yes
+
+      - name: Capture version and detect changes
+        id: capture
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Restore the original pubspec and apply only the version bump,
+          # so the commit stays free of injected Melos config.
+          cp pubspec.yaml.orig pubspec.yaml
+          sed -i "s/^version:.*/version: ${VERSION}/" pubspec.yaml
+
+          if git diff --quiet; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No releasable commits found. Stopping here."
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Melos determined new version: $VERSION"
+          fi
+
+      - name: Print proposed changes
+        if: steps.capture.outputs.has_changes == 'true'
+        run: |
+          echo ""
+          echo "══════════════════════════════════════════════════"
+          echo "  Proposed release: v${{ steps.capture.outputs.version }}"
+          echo "══════════════════════════════════════════════════"
+          echo ""
+          echo "── pubspec.yaml ──"
+          git diff pubspec.yaml
+          echo ""
+          echo "── CHANGELOG.md ──"
+          git diff CHANGELOG.md
+          echo ""
+          echo "══════════════════════════════════════════════════"
+          echo "  Review the diff above, then approve the publish"
+          echo "  step in the GitHub Actions UI to release."
+          echo "══════════════════════════════════════════════════"
+
+      - name: Upload versioned files as artifact
+        if: steps.capture.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: versioned-files
+          path: |
+            pubspec.yaml
+            CHANGELOG.md
+
+  publish:
+    name: "Publish"
+    needs: version
+    if: needs.version.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    container: instrumentisto/flutter:latest
+    environment: release
+
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: versioned-files
+
+      - name: Commit version bump and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          VERSION="${{ needs.version.outputs.new_version }}"
+          git add pubspec.yaml CHANGELOG.md
+          git commit -m "chore: release v${VERSION}"
+          git tag "v${VERSION}"
+          git push origin main --tags

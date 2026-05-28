@@ -1,0 +1,29 @@
+# Exclude CI/CD and tooling from published package
+.github/
+
+# Standard exclusions
+.gitignore
+.metadata
+.idea/
+build/
+coverage/
+
+example/android/
+example/ios/
+example/linux/
+example/macos/
+example/test/
+example/windows/
+example/web/
+example/build/
+example/.dart_tool/
+example/.metadata
+example/.gitignore
+example/pubspec.lock
+
+# To keep package small
+assets/
+
+# Misc.
+
+bench_results.md

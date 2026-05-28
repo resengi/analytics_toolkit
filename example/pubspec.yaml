@@ -1,0 +1,10 @@
+name: analytics_toolkit_example
+description: Runnable example demonstrating the analytics_toolkit package.
+publish_to: none
+
+environment:
+  sdk: ^3.10.1
+
+dependencies:
+  analytics_toolkit:
+    path: ../
