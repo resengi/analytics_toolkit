@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: safe.directory
+  GIT_CONFIG_VALUE_0: /usr/local/flutter
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    container: instrumentisto/flutter:latest
+    if: github.actor != 'resengi-release-bot[bot]'
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: flutter pub get
+      - run: flutter analyze
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    container: instrumentisto/flutter:latest
+    if: github.actor != 'resengi-release-bot[bot]'
+    
+    steps:
+      - uses: actions/checkout@v4
+      - run: flutter pub get
+      - run: flutter test
