@@ -67,9 +67,21 @@ jobs:
 
       - name: Fetch tags
         run: git fetch --tags
+      
+      - name: Debug tag visibility
+        run: |
+          git tag --list 'v*' --sort=-v:refname
+          git describe --tags --abbrev=0 || echo "NO TAG FOUND — this is the bug"
+
+      - name: Determine last release tag
+        id: lasttag
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*')
+          echo "tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
+          echo "::notice::Versioning since $LAST_TAG"
 
       - name: Bump version (local files only — no git tag, no commit)
-        run: melos version --no-git-commit-version --yes
+        run: melos version --no-git-commit-version --diff="${{ steps.lasttag.outputs.tag }}..HEAD" --yes
 
       - name: Capture version and detect changes
         id: capture
@@ -81,6 +93,9 @@ jobs:
           # so the commit stays free of injected Melos config.
           cp pubspec.yaml.orig pubspec.yaml
           sed -i "s/^version:.*/version: ${VERSION}/" pubspec.yaml
+
+          # Update the installation snippet in README.md
+          sed -i "s/analytics_toolkit: \^.*/analytics_toolkit: ^${VERSION}/" README.md
 
           if git diff --quiet; then
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
@@ -101,6 +116,9 @@ jobs:
           echo "── pubspec.yaml ──"
           git diff pubspec.yaml
           echo ""
+          echo "── README.md ──"
+          git diff README.md
+          echo ""
           echo "── CHANGELOG.md ──"
           git diff CHANGELOG.md
           echo ""
@@ -117,6 +135,7 @@ jobs:
           path: |
             pubspec.yaml
             CHANGELOG.md
+            README.md
 
   publish:
     name: "Publish"
@@ -148,7 +167,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           VERSION="${{ needs.version.outputs.new_version }}"
-          git add pubspec.yaml CHANGELOG.md
+          git add pubspec.yaml CHANGELOG.md README.md
           git commit -m "chore: release v${VERSION}"
           git tag "v${VERSION}"
           git push origin main --tags

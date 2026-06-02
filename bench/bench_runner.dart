@@ -26,6 +26,7 @@ import 'dart:io';
 
 import 'package:analytics_toolkit/analytics_toolkit.dart';
 
+import 'scenarios/calculated_measure.dart' as calculated_measure;
 import 'scenarios/derived_operations.dart' as derived_operations;
 import 'scenarios/multi_measure_aggregation.dart' as multi_measure_aggregation;
 import 'scenarios/multi_series_aggregation.dart' as multi_series_aggregation;
@@ -120,6 +121,14 @@ Future<void> main(List<String> args) async {
   await _runScenario(
     'multi_measure_aggregation',
     (n) => multi_measure_aggregation.run(recordCount: n),
+  );
+  await _runScenario(
+    'calculated_difference',
+    (n) => calculated_measure.runDifference(recordCount: n),
+  );
+  await _runScenario(
+    'calculated_nested',
+    (n) => calculated_measure.runNested(recordCount: n),
   );
   await _runScenario(
     'time_grouped_densified',

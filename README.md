@@ -11,11 +11,12 @@ Declare data sources, build typed queries with measures and group-bys, get typed
 ## Features
 
 - **Typed schema and values** — declarative `SourceDef` / `FieldDef` with a sealed `TypedValue` family (`StringValue`, `IntValue`, `DoubleValue`, `BoolValue`, `EnumValue`, `DateTimeValue`, `DurationValue`, list variants, `NullValue`) and a single canonical ordering via `TypedValueOrdering`
-- **Sealed measure family** — `CountMeasure`, `FieldMeasure` (with a sealed `FieldAggregation` family: `SumAgg`, `AverageAgg`, `MinAgg`, `MaxAgg`, `DistinctCountAgg`, `PercentileAgg`), and `StreakMeasure` for habit-tracking-style consecutive-completion analysis. A query may carry up to five measures, each with an optional `label`.
+- **Sealed measure family** — three leaf cases — `CountMeasure`, `FieldMeasure` (with a sealed `FieldAggregation` family: `SumAgg`, `AverageAgg`, `MinAgg`, `MaxAgg`, `DistinctCountAgg`, `PercentileAgg`), and `StreakMeasure` for habit-tracking-style consecutive-completion analysis — plus two expression cases, `TransformedMeasure` and `CalculatedMeasure`, that compose other measures into an arithmetic tree the engine treats as a single measure. A query may carry up to five measures, each with an optional `label`.
 - **Sealed group-by family** — `FieldGroupBy` for categorical pivoting and `TimeGroupBy` for temporal bucketing at any grain, with up to three group-by clauses per query and an optional `label` on each for column aliasing
 - **Sealed result family** — `ScalarResult`, `SeriesResult`, `MultiSeriesResult`, `MultiMeasureSeriesResult`, and `TableResult` with a unified `BucketKey` family (`StringBucketKey`, `EnumBucketKey`, `BoolBucketKey`, `IntBucketKey`, `DoubleBucketKey`, `TimeBucketKey`, `NullBucketKey`) and `BucketKeyOrdering` as the single source of truth for ordering
 - **Bucket-level filtering** — a `HavingClause` filters groups after aggregation by comparing a measure's value against a threshold, complementing record-level `Filter`s
 - **Derived operations** — `CumulativeSumOp`, `DeltaOp`, and `MovingAverageOp` applied after aggregation, with well-defined output-type rules (`IntValue` → `DoubleValue` for moving averages; `DurationValue` preserved)
+- **Series algebra** — a sealed `ScalarOp` family (`NegateOp`, `AbsOp`, `FillNullOp`) and a sealed `SeriesCombination` family (`SumCombination`, `DifferenceCombination`, `ProductCombination`, `RatioCombination`) with a single canonical type table; usable in-query via `TransformedMeasure` / `CalculatedMeasure` or on a held result via `SeriesAlgebra` (and the `SeriesAlgebraX` extension), with `UnmatchedBucketPolicy` governing key alignment
 - **Typed validation** — `QueryValidator` returns `Result<Unit, AnalyticsError>` with a closed `AnalyticsErrorKind` enum; the executor never throws for validation failures
 - **Pure-function execution** — `AnalyticsExecutor.execute` takes `(query, records, sources)` and returns `Result<AnalyticsResult, AnalyticsError>`; deterministic, no wall-clock reads, no hidden state
 - **First-class time-series support** — calendar-aligned date-range presets, configurable week-start and quarter-start months, half-open `[start, end)` ranges, time-bucket densification so charts have no gaps
@@ -144,7 +145,7 @@ void main() {
 }
 ```
 
-The `example/` directory contains a longer runnable tour covering every result shape, the time-series pipeline, derived operations, streaks, validation, and the codec.
+The `example/` directory contains a longer runnable tour covering every result shape, the time-series pipeline, derived operations, series algebra, streaks, validation, and the codec.
 
 ## Schema
 
@@ -282,7 +283,7 @@ Use `query.withAdditionalFilters([...])` to produce a copy with extra filters ap
 
 ### Measures
 
-`Measure` is a sealed family with three cases. Every measure accepts an optional `label`:
+`Measure` is a sealed family with five cases — three leaf cases that aggregate records directly, and two expression cases that compose other measures. Every measure accepts an optional `label`:
 
 ```dart
 // Count every record in the group.
@@ -311,13 +312,36 @@ const StreakMeasure(
   entityLabelField: FieldRef(sourceId: 'habits', fieldId: 'habitName'),
   topN: 10,
 )
+
+// Expression cases — compose other measures into one. Apply a per-value
+// op to a single child:
+const TransformedMeasure(
+  operand: FieldMeasure(
+    fieldRef: FieldRef(sourceId: 'orders', fieldId: 'total'),
+    aggregation: SumAgg(),
+  ),
+  op: NegateOp(),
+)
+
+// Or fold two children into one, e.g. profit = revenue − cost:
+const CalculatedMeasure(
+  operandA: FieldMeasure(
+    fieldRef: FieldRef(sourceId: 'orders', fieldId: 'revenue'),
+    aggregation: SumAgg(),
+  ),
+  operandB: FieldMeasure(
+    fieldRef: FieldRef(sourceId: 'orders', fieldId: 'cost'),
+    aggregation: SumAgg(),
+  ),
+  combination: DifferenceCombination(),
+)
 ```
 
 A query may carry up to five measures. With one group-by and two or more measures the executor produces a `MultiMeasureSeriesResult`; see [Results](#results). When more than one measure is present each must carry an explicit `label` wherever a `Sort` or `HavingClause` needs to address it, since the auto-generated `measure_<index>` labels are positional.
 
-Each measure declares a `supportsDateRange` capability — `CountMeasure` and `FieldMeasure` support page-level date ranges; `StreakMeasure` does not (streaks are computed over an entity's full lifetime). The validator enforces that the widget's `DateRangeMode` agrees with this flag.
+Each measure declares a `supportsDateRange` capability — `CountMeasure` and `FieldMeasure` support page-level date ranges; `StreakMeasure` does not (streaks are computed over an entity's full lifetime); the expression cases inherit the capability from their operands. The validator enforces that the widget's `DateRangeMode` agrees with this flag.
 
-See [Streaks](#streaks) below for the full `StreakMeasure` contract.
+An expression node is itself a `Measure`, so the whole tree counts as exactly one measure everywhere — result-shape inference, the five-measure cap, sorting, and the derived operation all treat it as one. See [Series algebra](#series-algebra) for the full `ScalarOp` / `SeriesCombination` contract and the result-level counterpart. See [Streaks](#streaks) below for the full `StreakMeasure` contract.
 
 ### Group-bys
 
@@ -432,6 +456,121 @@ const MovingAverageOp(window: 7) // window-of-N rolling mean
 Derived operations preserve the input value type for `CumulativeSumOp` and `DeltaOp`. `MovingAverageOp` preserves `DurationValue` but promotes `IntValue` to `DoubleValue` (the average of integers is generally fractional). Applying a derived op to a measure with non-numeric output (e.g. `min` over a `dateTime` field) is rejected with `derivedOpRequiresNumericMeasure`. Derived operations apply only to `SeriesResult`-shaped queries (a single group-by and a single numeric measure).
 
 `MovingAverageOp(window: N)` over a series of length M emits all M buckets — the first `N-1` use a partial window rather than being padded with null. Null bucket values (from `average`/`min`/`max` over empty groups, including synthetic empty buckets from densification) contribute `0` to the window sum at each position they appear in.
+
+### Series algebra
+
+Series algebra is per-value arithmetic over series: negate or absolute-value a series, fill its null buckets, or combine two series with `+`, `−`, `×`, `÷`. It comes in two flavors that share one set of arithmetic and type rules, so they never disagree:
+
+- **In-query**, as part of a `Measure` tree — `TransformedMeasure` (one operand) and `CalculatedMeasure` (two operands). Both children aggregate over the same bucket's records, so their values are inherently aligned and no key matching is needed.
+- **Result-level**, on a `SeriesResult` already in hand — `SeriesAlgebra` and the `SeriesAlgebraX` extension. This path requires no query, no re-fetch, and no re-aggregation; it aligns two held series by bucket key, so it carries an explicit `UnmatchedBucketPolicy`.
+
+Two small sealed families describe the operations themselves.
+
+`ScalarOp` is a per-value transform — one numeric value to one numeric value of the same type:
+
+```dart
+const NegateOp()      // v → -v;  propagates null
+const AbsOp()         // v → |v|; propagates null
+const FillNullOp(0)   // null → the given fill, boxed into the series type;
+                      // a non-null value passes through unchanged
+```
+
+`NegateOp` and `AbsOp` propagate null (a null value maps to null); `FillNullOp` is the only op that turns a null into a number, and only when asked. For a `duration` series the fill is interpreted in microseconds, so `FillNullOp(0)` yields `Duration.zero`.
+
+`SeriesCombination` folds two values into one:
+
+```dart
+const SumCombination()         // a + b
+const DifferenceCombination()  // a - b
+const ProductCombination()     // a * b   (always a unitless double)
+const RatioCombination()       // a / b   (always a unitless double; null when b is null or 0)
+```
+
+All combinations propagate null: if either operand is null, the result is null. `RatioCombination` additionally yields null when the denominator is null or zero.
+
+**Output types.** Every `ScalarOp` preserves the input type. For combinations, `combineOutputType` is the single source of truth: `SumCombination` and `DifferenceCombination` preserve the unit family (`integer`+`integer` → `integer`; any pair involving a `double` → `double`; `duration`+`duration` → `duration`; mixing a `duration` with a non-`duration` is **invalid**), while `ProductCombination` and `RatioCombination` always yield a unitless `double` (a `duration` operand contributes its microsecond magnitude). An invalid combination — a non-numeric operand, or a mixed-unit sum or difference — is rejected with `incompatibleSeriesCombination`.
+
+#### In-query: TransformedMeasure and CalculatedMeasure
+
+Both are `Measure` cases, so an expression tree is treated as exactly one measure by the rest of the engine (result-shape inference, the five-measure cap, sorting, the derived operation). Operands are held inline — not referenced by label — so an expression is self-contained, composes freely, and has no possibility of a reference cycle:
+
+```dart
+// Profit margin: (revenue − cost) / revenue, as a single measure.
+final margin = AnalyticsQuerySpec(
+  source: 'finance',
+  measures: const [
+    CalculatedMeasure(
+      operandA: CalculatedMeasure(
+        operandA: FieldMeasure(
+          fieldRef: FieldRef(sourceId: 'finance', fieldId: 'revenue'),
+          aggregation: SumAgg(),
+        ),
+        operandB: FieldMeasure(
+          fieldRef: FieldRef(sourceId: 'finance', fieldId: 'cost'),
+          aggregation: SumAgg(),
+        ),
+        combination: DifferenceCombination(),
+      ),
+      operandB: FieldMeasure(
+        fieldRef: FieldRef(sourceId: 'finance', fieldId: 'revenue'),
+        aggregation: SumAgg(),
+      ),
+      combination: RatioCombination(),
+      label: 'margin',
+    ),
+  ],
+  groupBys: [
+    FieldGroupBy(fieldRef: FieldRef(sourceId: 'finance', fieldId: 'region')),
+  ],
+);
+```
+
+`TransformedMeasure`'s output type equals its operand's; `CalculatedMeasure`'s is `combineOutputType` of the two operands. The validator rejects a non-numeric operand or a mixed-unit combination with `incompatibleSeriesCombination`, and a `StreakMeasure` used as an operand with `streakNotCombinable`. Expression nesting depth is bounded by `maxExpressionDepth` (default 8); a deeper tree is rejected with `preconditionViolation`.
+
+`TransformedMeasure` and `CalculatedMeasure` round-trip through `WidgetPayloadCodec` like any other measure — the operands and ops encode inline under the existing schema version, so persisting an expression measure is not a schema migration.
+
+#### Result-level: SeriesAlgebra
+
+`SeriesAlgebra` operates on a `SeriesResult` you already have, returning a new immutable `SeriesResult` (the input is never modified). Three statics cover the three operation families, and each validates its own operands and returns a `Result` rather than throwing:
+
+```dart
+// Whole-series derived op (cumulative sum, delta, moving average).
+SeriesAlgebra.apply(series, const CumulativeSumOp());
+
+// Per-value op (negate, absolute value, fill-null).
+SeriesAlgebra.transform(series, const NegateOp());
+
+// Binary combination of two held series, aligned by bucket key.
+SeriesAlgebra.combine(
+  revenueSeries,
+  costSeries,
+  op: const DifferenceCombination(),
+  policy: UnmatchedBucketPolicy.drop,
+);
+```
+
+The `SeriesAlgebraX` extension is ergonomic sugar over these, and because every method returns a `Result`, operations of different families chain through `andThen` — an ordering a single query spec cannot express:
+
+```dart
+// Running total, then negate the result.
+final net = series.cumulativeSum().andThen((s) => s.negated());
+
+// revenue − cost as two held series.
+final diff = revenueSeries.combineWith(costSeries, const DifferenceCombination());
+```
+
+The extension methods are `cumulativeSum()`, `delta()`, `movingAverage(n)`, `negated()`, `absolute()`, `fillNull(n)`, and `combineWith(other, op, {policy})`.
+
+**Combining two series.** `SeriesAlgebra.combine` aligns `x` and `y` by bucket key. It rejects (`incompatibleSeriesCombination`) when either series is non-numeric, when the two have incompatible group dimensions (different group kind or group field type), or when the measure types cannot be combined under the op. An empty or fully unmatched input still yields a valid (possibly empty) series, not an error. The result inherits `x`'s group metadata and takes the op's output type; `measureLabel`, `groupColumnLabel`, and `semanticTag` override the inherited values when supplied. A bucket is marked synthetic only when both contributing buckets were synthetic.
+
+**Absent keys vs. null values are independent.** `UnmatchedBucketPolicy` governs only an *absent key* — a key one series has and the other lacks. A *null value* (a present key whose value is null) always propagates regardless of policy; control absent keys with the policy and null values with `FillNullOp`.
+
+| Policy | Keys kept | Absent side treated as |
+|--------|-----------|------------------------|
+| `drop` (default) | intersection, in `x`'s order | — (key omitted) |
+| `fillIdentity` | union, sorted nulls-last | the combination's identity: `0` for sum/difference, `1` for product |
+
+A ratio has no identity, so under either policy a key absent on either side is omitted from a `RatioCombination`.
 
 ### Query payloads
 
@@ -605,11 +744,13 @@ final w = QueryValidator.validateWidgetPayload(
 
 `AnalyticsError` carries a closed `AnalyticsErrorKind` enum, an optional `affectedField` (`FieldRef?`), and a default English `humanMessage`. Consumers needing localization should switch on `kind` and produce their own copy.
 
+Both `validateQuery` and `validateWidgetPayload` accept an optional `maxExpressionDepth` (default `QueryValidator.defaultMaxExpressionDepth`, currently 8) that bounds the nesting depth of an expression measure; the same parameter is threaded through `AnalyticsExecutor.execute`. A tree deeper than the ceiling is rejected with `preconditionViolation`.
+
 ### Error kinds
 
 The closed list of `AnalyticsErrorKind` values:
 
-`unknownSource`, `unknownField`, `unknownMeasureLabel`, `fieldNotGroupable`, `fieldNotFilterable`, `fieldNotAggregatable`, `incompatibleAggregation`, `incompatibleOperator`, `timeGrainOnNonDateField`, `streakWithExplicitGrouping`, `measuresEmpty`, `tooManyMeasures`, `duplicateMeasureLabel`, `duplicateColumnLabel`, `streakNotCombinable`, `dateRangeNotSupportedForMeasure`, `dateRangeRequiredForMeasure`, `invalidDerivedOperationParameter`, `invalidAggregationParameter`, `incompatiblePairedQueryShapes`, `incompatibleSortTarget`, `tooManyGroupBys`, `multipleTemporalGroupBys`, `havingRequiresGrouping`, `derivedOpRequiresNumericMeasure`, `primaryDateFieldRequiredForOperation`, `preconditionViolation`, `sourceRecordTypeMismatch`, `unexpected`.
+`unknownSource`, `unknownField`, `unknownMeasureLabel`, `fieldNotGroupable`, `fieldNotFilterable`, `fieldNotAggregatable`, `incompatibleAggregation`, `incompatibleSeriesCombination`, `incompatibleOperator`, `timeGrainOnNonDateField`, `streakWithExplicitGrouping`, `measuresEmpty`, `tooManyMeasures`, `duplicateMeasureLabel`, `duplicateColumnLabel`, `streakNotCombinable`, `dateRangeNotSupportedForMeasure`, `dateRangeRequiredForMeasure`, `invalidDerivedOperationParameter`, `invalidAggregationParameter`, `incompatiblePairedQueryShapes`, `incompatibleSortTarget`, `tooManyGroupBys`, `multipleTemporalGroupBys`, `havingRequiresGrouping`, `derivedOpRequiresNumericMeasure`, `primaryDateFieldRequiredForOperation`, `preconditionViolation`, `sourceRecordTypeMismatch`, `unexpected`.
 
 Adding a new kind is a breaking change for any consumer that pattern-matches the full set.
 
@@ -658,6 +799,7 @@ final result = AnalyticsExecutor.execute(
 | `asOf` | `DateTime?` | Reference "now" for `StreakMeasure`. Required for streak queries; unused otherwise. |
 | `dateRange` | `(DateTime, DateTime)?` | The resolved page-level date range used to fetch records. When non-null and the query uses `TimeGroupBy`, the executor densifies the result so every bucket in the range is represented. |
 | `densify` | `bool` | Whether to densify temporal series; defaults to `true`. Set `false` to emit only observed buckets. |
+| `maxExpressionDepth` | `int` | Ceiling on the nesting depth of an expression measure (`TransformedMeasure` / `CalculatedMeasure`); a deeper tree is rejected with `preconditionViolation`. Defaults to `QueryValidator.defaultMaxExpressionDepth` (8). |
 
 ### Source records
 
@@ -1043,73 +1185,89 @@ Bulk operations do not piggyback on `widgetSet` — multi-widget restore is out 
 
 | records   | median    | p95       | p99       |
 | --------- | --------- | --------- | --------- |
-| 10,000    | 1.5 ms    | 6.6 ms    | 7.9 ms    |
-| 100,000   | 12.4 ms   | 16.5 ms   | 16.5 ms   |
-| 1,000,000 | 148 ms    | 158 ms    | 161 ms    |
+| 10,000    | 1.7 ms    | 6.6 ms    | 7.9 ms    |
+| 100,000   | 13.9 ms   | 17.8 ms   | 17.9 ms   |
+| 1,000,000 | 163 ms    | 171 ms    | 173 ms    |
 
 ## multi_series_aggregation
 
 | records   | median    | p95       | p99       |
 | --------- | --------- | --------- | --------- |
-| 10,000    | 1.9 ms    | 4.9 ms    | 6.5 ms    |
-| 100,000   | 16.9 ms   | 21.5 ms   | 21.7 ms   |
-| 1,000,000 | 198 ms    | 208 ms    | 212 ms    |
+| 10,000    | 1.8 ms    | 3.8 ms    | 4.0 ms    |
+| 100,000   | 18.0 ms   | 19.9 ms   | 20.1 ms   |
+| 1,000,000 | 198 ms    | 207 ms    | 209 ms    |
 
 ## multi_measure_aggregation
 
 | records   | median    | p95       | p99       |
 | --------- | --------- | --------- | --------- |
-| 10,000    | 2.0 ms    | 5.4 ms    | 7.0 ms    |
-| 100,000   | 25.4 ms   | 30.5 ms   | 31.1 ms   |
-| 1,000,000 | 466 ms    | 482 ms    | 485 ms    |
+| 10,000    | 2.9 ms    | 7.0 ms    | 8.8 ms    |
+| 100,000   | 28.9 ms   | 35.2 ms   | 36.5 ms   |
+| 1,000,000 | 510 ms    | 536 ms    | 539 ms    |
+
+## calculated_difference
+
+| records   | median    | p95       | p99       |
+| --------- | --------- | --------- | --------- |
+| 10,000    | 1.9 ms    | 2.6 ms    | 2.7 ms    |
+| 100,000   | 28.7 ms   | 35.4 ms   | 35.8 ms   |
+| 1,000,000 | 389 ms    | 407 ms    | 409 ms    |
+
+## calculated_nested
+
+| records   | median    | p95       | p99       |
+| --------- | --------- | --------- | --------- |
+| 10,000    | 2.0 ms    | 3.5 ms    | 4.1 ms    |
+| 100,000   | 30.7 ms   | 36.6 ms   | 38.3 ms   |
+| 1,000,000 | 483 ms    | 504 ms    | 506 ms    |
 
 ## time_grouped_densified
 
 | records   | median    | p95       | p99       |
 | --------- | --------- | --------- | --------- |
-| 10,000    | 6.4 ms    | 17.1 ms   | 17.2 ms   |
-| 100,000   | 63.5 ms   | 66.9 ms   | 67.4 ms   |
-| 1,000,000 | 643 ms    | 662 ms    | 664 ms    |
+| 10,000    | 6.9 ms    | 18.4 ms   | 18.7 ms   |
+| 100,000   | 68.9 ms   | 72.2 ms   | 72.3 ms   |
+| 1,000,000 | 682 ms    | 694 ms    | 696 ms    |
 
 ## time_grouped_sparse
 
 | records   | median    | p95       | p99       |
 | --------- | --------- | --------- | --------- |
-| 10,000    | 6.2 ms    | 7.6 ms    | 7.8 ms    |
-| 100,000   | 64.8 ms   | 67.5 ms   | 68.0 ms   |
-| 1,000,000 | 652 ms    | 668 ms    | 672 ms    |
+| 10,000    | 6.6 ms    | 7.7 ms    | 8.3 ms    |
+| 100,000   | 68.1 ms   | 72.1 ms   | 74.5 ms   |
+| 1,000,000 | 682 ms    | 695 ms    | 697 ms    |
 
 ## streak
 
 | records   | median    | p95       | p99       |
 | --------- | --------- | --------- | --------- |
-| 10,000    | 6.9 ms    | 10.3 ms   | 10.7 ms   |
-| 100,000   | 68.8 ms   | 71.4 ms   | 72.4 ms   |
-| 1,000,000 | 700 ms    | 725 ms    | 728 ms    |
+| 10,000    | 7.3 ms    | 11.1 ms   | 11.7 ms   |
+| 100,000   | 73.6 ms   | 74.6 ms   | 74.6 ms   |
+| 1,000,000 | 740 ms    | 758 ms    | 759 ms    |
 
 ## derived_cumulative_sum
 
 | records   | median    | p95       | p99       |
 | --------- | --------- | --------- | --------- |
-| 10,000    | 6.3 ms    | 7.9 ms    | 8.3 ms    |
-| 100,000   | 65.2 ms   | 68.2 ms   | 68.3 ms   |
-| 1,000,000 | 664 ms    | 678 ms    | 682 ms    |
+| 10,000    | 6.7 ms    | 9.5 ms    | 10.9 ms   |
+| 100,000   | 68.2 ms   | 70.8 ms   | 72.2 ms   |
+| 1,000,000 | 684 ms    | 697 ms    | 699 ms    |
 
 ## derived_delta
 
 | records   | median    | p95       | p99       |
 | --------- | --------- | --------- | --------- |
-| 10,000    | 6.3 ms    | 7.4 ms    | 7.7 ms    |
-| 100,000   | 65.2 ms   | 66.0 ms   | 66.2 ms   |
-| 1,000,000 | 664 ms    | 679 ms    | 682 ms    |
+| 10,000    | 6.6 ms    | 8.4 ms    | 9.2 ms    |
+| 100,000   | 68.0 ms   | 68.3 ms   | 68.4 ms   |
+| 1,000,000 | 688 ms    | 699 ms    | 702 ms    |
 
 ## derived_moving_average_window_7
 
 | records   | median    | p95       | p99       |
 | --------- | --------- | --------- | --------- |
-| 10,000    | 6.4 ms    | 7.4 ms    | 7.7 ms    |
-| 100,000   | 65.7 ms   | 67.7 ms   | 68.4 ms   |
-| 1,000,000 | 656 ms    | 683 ms    | 688 ms    |
+| 10,000    | 6.6 ms    | 7.6 ms    | 8.0 ms    |
+| 100,000   | 68.4 ms   | 73.9 ms   | 75.9 ms   |
+| 1,000,000 | 685 ms    | 707 ms    | 708 ms    |
 
 
 <!-- BENCH:END -->
@@ -1142,7 +1300,7 @@ Reading the tables above: under 10,000 records every scenario completes in singl
 
 ## Modeling signed quantities
 
-When you want a running net over time — a bank balance from deposits and withdrawals, an inventory level from items added and removed, anything where positive and negative contributions accumulate — the instinct is to look for a "negate this series" derived operation. That operation does not exist (and intentionally won't). The toolkit-idiomatic answer is to put the sign in the data.
+When you want a running net over time — a bank balance from deposits and withdrawals, an inventory level from items added and removed, anything where positive and negative contributions accumulate — one instinct is to negate a withdrawals series and add it to a deposits series. Series algebra now makes that expressible (`NegateOp`, or `SeriesAlgebra.combine` with `DifferenceCombination`), but for a *running net from a single source* the toolkit-idiomatic answer is simpler: put the sign in the data.
 
 Model the source with a single `signedAmount` numeric field. Deposit-shaped events emit positive values; withdrawal-shaped events emit negative values. A single query — `sum(signedAmount)` grouped by `TimeGroupBy(month)` with `CumulativeSumOp` — produces a running balance naturally:
 
@@ -1203,7 +1361,7 @@ final runningBalance = AnalyticsQuerySpec(
 
 The resulting `SeriesResult` has one bucket per month, each carrying the running total of all transactions up to and including that month. For example, if January nets +500.00, February nets −175.00, and March nets +107.50, the series reads `Jan: +500.00`, `Feb: +325.00`, `Mar: +432.50`. Withdrawals lower the running total because their `signedAmount` is negative; deposits raise it. If you also want to chart deposits and withdrawals as separate series, filter on `signedAmount > 0` for one query and `signedAmount < 0` for the other — same source, same field, two queries.
 
-The alternative shape — two record types, one for each direction — pushes the combine work out of the typed-query layer and into consumer code that has to align two result series before computing the running total. Folding the sign into the record keeps every running-net derivation expressible as one query against one source, and the same pattern handles non-monetary "running net" use cases unchanged.
+The alternative shape — two record types, one for each direction — pushes the combine work out of the typed-query layer and into consumer code. If you do start from two separate series, `SeriesAlgebra.combine` can align and fold them by bucket key after the fact (see [Series algebra](#series-algebra)); but folding the sign into the record is cheaper still, keeping every running-net derivation expressible as one query against one source, and the same pattern handles non-monetary "running net" use cases unchanged.
 
 The pattern generalizes: any "running net" use case becomes "single record type with a signed numeric field." The work happens at the source-provider boundary, where the host normalizes input data anyway, and the package's symmetric agnosticism stays intact.
 

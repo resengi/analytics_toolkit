@@ -206,6 +206,25 @@ abstract class WidgetPayloadCodec {
           'topN': ?topN,
           if (measure.label != null) 'label': measure.label,
         };
+      case TransformedMeasure(operand: final operand, op: final op):
+        return {
+          'kind': 'transformed',
+          'op': _scalarOpToJson(op),
+          'operand': _measureToJson(operand),
+          if (measure.label != null) 'label': measure.label,
+        };
+      case CalculatedMeasure(
+        operandA: final a,
+        operandB: final b,
+        combination: final combination,
+      ):
+        return {
+          'kind': 'calculated',
+          'combination': _seriesCombinationToJson(combination),
+          'operandA': _measureToJson(a),
+          'operandB': _measureToJson(b),
+          if (measure.label != null) 'label': measure.label,
+        };
     }
   }
 
@@ -239,8 +258,82 @@ abstract class WidgetPayloadCodec {
           topN: _optionalInt(json, 'topN'),
           label: label,
         );
+      case 'transformed':
+        return TransformedMeasure(
+          operand: _measureFromJson(_requireMap(json, 'operand')),
+          op: _scalarOpFromJson(_requireMap(json, 'op')),
+          label: label,
+        );
+      case 'calculated':
+        return CalculatedMeasure(
+          operandA: _measureFromJson(_requireMap(json, 'operandA')),
+          operandB: _measureFromJson(_requireMap(json, 'operandB')),
+          combination: _seriesCombinationFromJson(
+            _requireString(json, 'combination'),
+          ),
+          label: label,
+        );
       default:
         throw FormatException('Unknown Measure kind: $kind');
+    }
+  }
+
+  // ── ScalarOp / SeriesCombination ──────────────────────────────────────
+
+  /// Encodes a [ScalarOp] inline within its [TransformedMeasure]: a
+  /// `kind` discriminator, plus `fill` for [FillNullOp].
+  static Map<String, dynamic> _scalarOpToJson(ScalarOp op) {
+    switch (op) {
+      case NegateOp():
+        return {'kind': 'negate'};
+      case AbsOp():
+        return {'kind': 'abs'};
+      case FillNullOp(fill: final fill):
+        return {'kind': 'fillNull', 'fill': fill};
+    }
+  }
+
+  static ScalarOp _scalarOpFromJson(Map<String, dynamic> json) {
+    final kind = _optionalString(json, 'kind');
+    switch (kind) {
+      case 'negate':
+        return const NegateOp();
+      case 'abs':
+        return const AbsOp();
+      case 'fillNull':
+        return FillNullOp(_requireNum(json, 'fill'));
+      default:
+        throw FormatException('Unknown ScalarOp kind: $kind');
+    }
+  }
+
+  /// Encodes a [SeriesCombination] as a single `kind` tag, stored inline
+  /// within its [CalculatedMeasure].
+  static String _seriesCombinationToJson(SeriesCombination combination) {
+    switch (combination) {
+      case SumCombination():
+        return 'sum';
+      case DifferenceCombination():
+        return 'difference';
+      case ProductCombination():
+        return 'product';
+      case RatioCombination():
+        return 'ratio';
+    }
+  }
+
+  static SeriesCombination _seriesCombinationFromJson(String tag) {
+    switch (tag) {
+      case 'sum':
+        return const SumCombination();
+      case 'difference':
+        return const DifferenceCombination();
+      case 'product':
+        return const ProductCombination();
+      case 'ratio':
+        return const RatioCombination();
+      default:
+        throw FormatException('Unknown SeriesCombination tag: $tag');
     }
   }
 
@@ -723,6 +816,15 @@ abstract class WidgetPayloadCodec {
     if (v == null) return null;
     if (v is int) return v;
     throw FormatException(_typeMsg('int?', key, v));
+  }
+
+  /// Reads a JSON-numeric value as a `num`, preserving the int/double
+  /// distinction the JSON wire carries (`1` stays an int, `1.5` a
+  /// double). Used for [FillNullOp.fill].
+  static num _requireNum(Map<String, dynamic> json, String key) {
+    final v = json[key];
+    if (v is num) return v;
+    throw FormatException(_typeMsg('num', key, v));
   }
 
   /// Reads a JSON-numeric value as a double. JSON does not distinguish
