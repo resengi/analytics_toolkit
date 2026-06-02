@@ -1024,9 +1024,11 @@ abstract class AnalyticsExecutor {
     final output = measure.outputFieldType(source);
     if (output == null) {
       throw StateError(
-        'AnalyticsExecutor._resolveMeasureOutputType: streak measure '
-        'reached a result-construction helper; the streak short-circuit '
-        'at the top of execute() should have intercepted.',
+        'AnalyticsExecutor._resolveMeasureOutputType: ${measure.runtimeType} '
+        'produced a null output type. This happens for a StreakMeasure '
+        '(which the streak short-circuit at the top of execute() should '
+        'have intercepted) or an invalid CalculatedMeasure combination '
+        '(which the validator should have rejected upstream).',
       );
     }
     return output;

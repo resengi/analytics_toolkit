@@ -12,8 +12,15 @@
 /// duration-with-duration sums and differences stay exact and typed.
 /// `double` rounding is confined to the boxing step, where an `integer`
 /// or `duration` result is rounded to the nearest whole unit.
+///
+/// Because the intermediate is always `double`, `integer` or `duration`
+/// magnitudes beyond 2^53 (in whole units / microseconds) can lose
+/// precision before boxing. This is an accepted bound for an in-memory
+/// analytics engine and is well outside realistic dashboard ranges; it
+/// is documented here rather than guarded against.
 library;
 
+import '../errors.dart';
 import '../query/query_components.dart';
 import '../schema/schema.dart';
 import '../schema/typed_value.dart';
@@ -112,6 +119,33 @@ FieldType? combineOutputType(FieldType? a, FieldType? b, SeriesCombination op) {
     case ProductCombination():
     case RatioCombination():
       return FieldType.double;
+  }
+}
+
+/// The parameter error for [op], or null when its own parameters are
+/// well-formed.
+///
+/// "Own parameters" are intrinsic to the operation, independent of the
+/// series it is applied to — currently only [MovingAverageOp.window],
+/// which must be > 0. The numeric-measure requirement is series-
+/// dependent and is checked separately by each caller.
+///
+/// Single source of truth for derived-op parameter validity, shared by
+/// `QueryValidator` (in-query) and `SeriesAlgebra.apply` (result-level)
+/// so the two paths never disagree — the same split `combineOutputType`
+/// uses for combinations.
+AnalyticsError? derivedOperationParameterError(DerivedOperation op) {
+  switch (op) {
+    case MovingAverageOp(window: final window) when window <= 0:
+      return AnalyticsError(
+        kind: AnalyticsErrorKind.invalidDerivedOperationParameter,
+        humanMessage: 'MovingAverageOp.window must be > 0; got $window.',
+      );
+    case NoDerivedOp():
+    case CumulativeSumOp():
+    case DeltaOp():
+    case MovingAverageOp():
+      return null;
   }
 }
 

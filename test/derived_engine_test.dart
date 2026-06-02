@@ -92,4 +92,38 @@ void main() {
       });
     }
   });
+
+  /// The measure-type rule for derived ops, exercised through the query
+  /// path (the executor calls `DerivedEngine.apply` on the aggregated
+  /// series). The fixture's `CountMeasure` is integer-typed, so this
+  /// pins how each op maps that input type.
+  group('measure type follows the operation output-type rule', () {
+    test('cumulative sum preserves the integer measure type', () {
+      final s = runWithOperation(
+        records: recordsOnFirstAndThird(),
+        operation: const CumulativeSumOp(),
+      );
+      expect(s.measureFieldType, FieldType.integer);
+    });
+
+    test('delta preserves the integer measure type', () {
+      final s = runWithOperation(
+        records: recordsOnFirstAndThird(),
+        operation: const DeltaOp(),
+      );
+      expect(s.measureFieldType, FieldType.integer);
+    });
+
+    test('moving average over an integer measure reports double', () {
+      final s = runWithOperation(
+        records: recordsOnFirstAndThird(),
+        operation: const MovingAverageOp(window: 2),
+      );
+      expect(s.measureFieldType, FieldType.double);
+      expect(
+        s.buckets.every((b) => b.value == null || b.value is DoubleValue),
+        isTrue,
+      );
+    });
+  });
 }

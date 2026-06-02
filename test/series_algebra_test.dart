@@ -1,6 +1,8 @@
 import 'package:analytics_toolkit/analytics_toolkit.dart';
 import 'package:test/test.dart';
 
+import '_fixtures.dart';
+
 /// Behavioral tests for `SeriesAlgebra` and the `SeriesAlgebraX`
 /// extension — the path that operates on a `SeriesResult` already in
 /// hand. The arithmetic and type rules these exercise are the same ones
@@ -109,6 +111,14 @@ void main() {
     expect(r.errOrNull!.kind, AnalyticsErrorKind.incompatibleSeriesCombination);
   }
 
+  void expectInvalidParam(Result<SeriesResult, AnalyticsError> r) {
+    expect(r.isErr, isTrue);
+    expect(
+      r.errOrNull!.kind,
+      AnalyticsErrorKind.invalidDerivedOperationParameter,
+    );
+  }
+
   // ── apply ─────────────────────────────────────────────────────────────
 
   group('apply', () {
@@ -141,6 +151,79 @@ void main() {
       final r = ok(SeriesAlgebra.apply(intSeries([]), const CumulativeSumOp()));
       expect(r.buckets, isEmpty);
     });
+
+    test('a moving average with a zero window is rejected', () {
+      expectInvalidParam(
+        SeriesAlgebra.apply(
+          intSeries([('a', 1), ('b', 2)]),
+          const MovingAverageOp(window: 0),
+        ),
+      );
+    });
+
+    test('movingAverage(-1) via the extension is rejected', () {
+      expectInvalidParam(intSeries([('a', 1)]).movingAverage(-1));
+    });
+
+    test('a window of 1 is accepted (the identity boundary)', () {
+      final r = ok(intSeries([('a', 2), ('b', 4)]).movingAverage(1));
+      expect(r.measureFieldType, FieldType.double);
+      expect(doubles(r), [('a', 2.0), ('b', 4.0)]);
+    });
+
+    test('the parameter check precedes the numeric-series check', () {
+      expectInvalidParam(
+        SeriesAlgebra.apply(
+          stringSeries([('a', 'x')]),
+          const MovingAverageOp(window: 0),
+        ),
+      );
+    });
+  });
+
+  test('validator and SeriesAlgebra.apply agree on an invalid window', () {
+    // The whole design goal is that the in-query and result-level paths
+    // share one rule (`derivedOperationParameterError`) and never
+    // disagree. This asserts the pair directly: if someone later forks
+    // the rule back into two local checks that drift, the per-path tests
+    // above might both still pass, but this one fails.
+    const op = MovingAverageOp(window: 0);
+
+    // Result-level path. A NUMERIC series keeps the comparison
+    // unambiguous: with the parameter check first, the window error is
+    // what surfaces, not the numeric-series error.
+    final resultLevel = SeriesAlgebra.apply(intSeries([('a', 1)]), op);
+
+    // In-query path: a minimal valid query carrying the same op over a
+    // temporal series (a moving average needs a single ordered group).
+    final inQuery = QueryValidator.validateQuery(
+      AnalyticsQuerySpec(
+        source: 'events',
+        measures: [
+          FieldMeasure(
+            fieldRef: ref('events', 'amount'),
+            aggregation: const SumAgg(),
+          ),
+        ],
+        groupBys: [
+          TimeGroupBy(
+            dateFieldRef: ref('events', 'occurredAt'),
+            grain: TimeGrain.day,
+          ),
+        ],
+        derivedOperation: op,
+      ),
+      sources: [eventsSource()],
+    );
+
+    expect(resultLevel.isErr, isTrue);
+    expect(inQuery.isErr, isTrue);
+    expect(
+      resultLevel.errOrNull!.kind,
+      AnalyticsErrorKind.invalidDerivedOperationParameter,
+    );
+    // The crux: both paths report the SAME kind.
+    expect(inQuery.errOrNull!.kind, resultLevel.errOrNull!.kind);
   });
 
   // ── transform ───────────────────────────────────────────────────────────
@@ -189,6 +272,41 @@ void main() {
     test('a non-numeric series is rejected', () {
       expectIncompatible(
         SeriesAlgebra.transform(stringSeries([('a', 'x')]), const NegateOp()),
+      );
+    });
+
+    test('scalar ops box duration results correctly', () {
+      final negated = ok(
+        SeriesAlgebra.transform(
+          durationSeries([('a', const Duration(minutes: 10)), ('b', null)]),
+          const NegateOp(),
+        ),
+      );
+      expect(
+        (negated.buckets[0].value as DurationValue).value,
+        const Duration(minutes: -10),
+      );
+      expect(negated.buckets[1].value, isNull); // null propagates
+
+      // FillNullOp(0) on a duration means 0 microseconds = Duration.zero.
+      final filled = ok(
+        SeriesAlgebra.transform(
+          durationSeries([('a', null)]),
+          const FillNullOp(0),
+        ),
+      );
+      expect(
+        (filled.buckets.single.value as DurationValue).value,
+        Duration.zero,
+      );
+    });
+
+    test('fill-null on a non-numeric series is rejected', () {
+      expectIncompatible(
+        SeriesAlgebra.transform(
+          stringSeries([('a', 'x')]),
+          const FillNullOp(0),
+        ),
       );
     });
   });
@@ -286,6 +404,25 @@ void main() {
         ),
       );
     });
+
+    test(
+      'product with a duration operand yields the microsecond magnitude',
+      () {
+        // 2 minutes = 120_000_000 microseconds; × 3 (unitless) = 3.6e8.
+        final r = ok(
+          SeriesAlgebra.combine(
+            durationSeries([('a', const Duration(minutes: 2))]),
+            intSeries([('a', 3)]),
+            op: const ProductCombination(),
+          ),
+        );
+        expect(r.measureFieldType, FieldType.double);
+        expect(
+          doubles(r).single.$2,
+          closeTo(const Duration(minutes: 2).inMicroseconds * 3, 1e-3),
+        );
+      },
+    );
   });
 
   // ── combine: drop policy ─────────────────────────────────────────────────
@@ -469,5 +606,52 @@ void main() {
     ok(SeriesAlgebra.combine(x, y, op: const SumCombination()));
     expect(ints(x), [('a', 1), ('b', 2)]);
     expect(ints(y), [('a', 10), ('b', 20)]);
+  });
+
+  test('combine carries displayLabel from x, falling back to y', () {
+    SeriesResult labeled(List<(String, int, String?)> entries) => SeriesResult(
+      buckets: [
+        for (final e in entries)
+          SeriesBucket(
+            key: StringBucketKey(e.$1),
+            value: IntValue(e.$2),
+            displayLabel: e.$3,
+          ),
+      ],
+      groupKind: SeriesGroupKind.categorical,
+      groupColumnLabel: 'g',
+      groupColumnFieldType: FieldType.string,
+      measureLabel: 'm',
+      measureFieldType: FieldType.integer,
+    );
+
+    String? labelAt(SeriesResult s, String key) => s.buckets
+        .firstWhere((b) => (b.key as StringBucketKey).value == key)
+        .displayLabel;
+
+    // drop: 'a' has labels on both sides (x wins); 'b' only on y's side
+    // (the present-bucket fallback applies since x also has 'b').
+    final dropped = ok(
+      SeriesAlgebra.combine(
+        labeled([('a', 1, 'x-a'), ('b', 2, null)]),
+        labeled([('a', 10, 'y-a'), ('b', 20, 'y-b')]),
+        op: const SumCombination(),
+      ),
+    );
+    expect(labelAt(dropped, 'a'), 'x-a'); // x preferred
+    expect(labelAt(dropped, 'b'), 'y-b'); // x had none, fell back to y
+
+    // fillIdentity: 'a' only in x, 'b' only in y. Each filled bucket
+    // takes the present side's label.
+    final filled = ok(
+      SeriesAlgebra.combine(
+        labeled([('a', 5, 'x-a')]),
+        labeled([('b', 7, 'y-b')]),
+        op: const SumCombination(),
+        policy: UnmatchedBucketPolicy.fillIdentity,
+      ),
+    );
+    expect(labelAt(filled, 'a'), 'x-a'); // present side is x
+    expect(labelAt(filled, 'b'), 'y-b'); // present side is y
   });
 }

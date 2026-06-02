@@ -32,12 +32,16 @@ abstract class SeriesAlgebra {
   /// Applies a whole-series [op] to [series].
   ///
   /// Returns the input unchanged for [NoDerivedOp]. Returns an
+  /// `invalidDerivedOperationParameter` error when [op]'s own parameters
+  /// are out of range (a [MovingAverageOp] with `window <= 0`), and an
   /// `incompatibleSeriesCombination` error when [series] is not numeric.
   static Result<SeriesResult, AnalyticsError> apply(
     SeriesResult series,
     DerivedOperation op,
   ) {
     if (op is NoDerivedOp) return Ok(series);
+    final paramError = derivedOperationParameterError(op);
+    if (paramError != null) return Err(paramError);
     if (!isNumericFieldType(series.measureFieldType)) {
       return _incompatible(
         'A derived operation requires a numeric series; '
@@ -97,7 +101,10 @@ abstract class SeriesAlgebra {
   ///
   /// The result inherits [x]'s group metadata and uses [op]'s output
   /// type for the measure. [measureLabel], [groupColumnLabel], and
-  /// [semanticTag] override the inherited values when supplied.
+  /// [semanticTag] override the inherited values when supplied. Each
+  /// output bucket's `displayLabel` is taken from [x]'s side, falling
+  /// back to [y]'s; a bucket filled under [UnmatchedBucketPolicy.fillIdentity]
+  /// takes the present side's label.
   ///
   /// Returns an `incompatibleSeriesCombination` error when either series
   /// is non-numeric, when the two series have incompatible group
@@ -157,6 +164,7 @@ abstract class SeriesAlgebra {
               key: xb.key,
               value: combinePerValue(xb.value, yb.value, op, outType),
               isSynthetic: xb.isSynthetic && yb.isSynthetic,
+              displayLabel: xb.displayLabel ?? yb.displayLabel,
             ),
           );
         }
@@ -174,6 +182,7 @@ abstract class SeriesAlgebra {
                 key: key,
                 value: combinePerValue(xb.value, yb.value, op, outType),
                 isSynthetic: xb.isSynthetic && yb.isSynthetic,
+                displayLabel: xb.displayLabel ?? yb.displayLabel,
               ),
             );
             continue;
@@ -186,6 +195,7 @@ abstract class SeriesAlgebra {
                 key: key,
                 value: combinePerValue(xValue, yb!.value, op, outType),
                 isSynthetic: yb.isSynthetic,
+                displayLabel: yb.displayLabel,
               ),
             );
           } else {
@@ -195,6 +205,7 @@ abstract class SeriesAlgebra {
                 key: key,
                 value: combinePerValue(xb.value, yValue, op, outType),
                 isSynthetic: xb.isSynthetic,
+                displayLabel: xb.displayLabel,
               ),
             );
           }

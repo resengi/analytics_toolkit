@@ -90,7 +90,8 @@ abstract class DerivedEngine {
   }
 
   /// Simple moving average. Buckets before the window is full use a
-  /// partial window. The validator has already ensured `window > 0`.
+  /// partial window. Callers must ensure `window > 0` (via
+  /// `derivedOperationParameterError`); behavior is undefined otherwise.
   static List<double> _movingAverage(List<SeriesBucket> buckets, int window) {
     if (buckets.isEmpty) return const [];
     final out = <double>[];
@@ -130,7 +131,7 @@ abstract class DerivedEngine {
       groupColumnLabel: series.groupColumnLabel,
       groupColumnFieldType: series.groupColumnFieldType,
       measureLabel: series.measureLabel,
-      measureFieldType: series.measureFieldType,
+      measureFieldType: outType,
       semanticTag: series.semanticTag,
     );
   }

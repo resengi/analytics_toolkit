@@ -1066,24 +1066,14 @@ abstract class QueryValidator {
     Measure? measure,
     SourceDef source,
   ) {
-    // Parameter checks first.
-    switch (op) {
-      case NoDerivedOp():
-        return const Ok(Unit.value);
-      case MovingAverageOp(window: final window):
-        if (window <= 0) {
-          return Err(
-            AnalyticsError(
-              kind: AnalyticsErrorKind.invalidDerivedOperationParameter,
-              humanMessage: 'MovingAverageOp.window must be > 0; got $window.',
-            ),
-          );
-        }
-        break;
-      case CumulativeSumOp():
-      case DeltaOp():
-        break;
-    }
+    // NoDerivedOp: nothing to validate.
+    if (op is NoDerivedOp) return const Ok(Unit.value);
+
+    // Parameter checks — shared with the result-level path
+    // (`SeriesAlgebra.apply`) via `derivedOperationParameterError` so the
+    // two never disagree.
+    final paramError = derivedOperationParameterError(op);
+    if (paramError != null) return Err(paramError);
 
     // Numeric-measure requirement: derived ops are only meaningful
     // over measures whose output is numeric. When [measure] is null,
