@@ -43,7 +43,7 @@ Add the package to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  analytics_toolkit: ^0.1.0
+  analytics_toolkit: ^0.2.0
 ```
 
 Then run:

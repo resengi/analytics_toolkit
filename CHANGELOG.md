@@ -2,6 +2,33 @@
 
 
 
+## 2026-06-02
+
+### Changes
+
+---
+
+Packages with breaking changes:
+
+ - [`analytics_toolkit` - `v0.2.0`](#analytics_toolkit---v020)
+
+Packages with other changes:
+
+ - There are no other changes in this release.
+
+---
+
+#### `analytics_toolkit` - `v0.2.0`
+
+ - **BREAKING** **FEAT**: Adding new series computation functionality ([#2](https://github.com/resengi/analytics_toolkit/issues/2)). ([215e6544](https://github.com/resengi/analytics_toolkit/commit/215e6544bc65c3e0f4f85adec2cd8971607c9103))
+
+## 0.2.0
+
+> Note: This release has breaking changes.
+
+ - **BREAKING** **FEAT**: Adding new series computation functionality ([#2](https://github.com/resengi/analytics_toolkit/issues/2)). ([215e6544](https://github.com/resengi/analytics_toolkit/commit/215e6544bc65c3e0f4f85adec2cd8971607c9103))
+
+
 ## 2026-05-28
 
 ### Changes
@@ -46,4 +73,5 @@ This release establishes the foundational API surface:
 - **Persistence** — `AnalyticsWidgetSpec` plus `WidgetPayloadCodec` round-trip user-built widget specs to JSON with a schema-version guard for forward compatibility.
 - **Caching and change events** — `SourceSnapshotCache` for records-layer caching (in-flight dedup, scoped invalidation, discard-on-completion for stale fetches) and `AnalyticsChange` / `AnalyticsChangeKind` for typed listener invalidation.
 - **Zero external dependencies** — only `dart:core` and `dart:convert`.nd `AnalyticsChange` / `AnalyticsChangeKind` for typed listener invalidation.
+- **Zero external dependencies** — only `dart:core` and `dart:convert`.`dart:convert`.nd `AnalyticsChange` / `AnalyticsChangeKind` for typed listener invalidation.
 - **Zero external dependencies** — only `dart:core` and `dart:convert`.
