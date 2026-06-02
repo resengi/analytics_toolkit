@@ -2,7 +2,7 @@ melos:
   useRootAsPackage: true
   command:
     version:
-      fetchTags: false
+      fetchTags: true
       message: "chore: release v{new_version} [skip ci]"
       releaseUrl: true
       conventionalCommits:
