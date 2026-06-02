@@ -3,8 +3,8 @@
 // Each section below builds a small in-memory dataset, runs a query,
 // and prints the result. The sections progress from the simplest case
 // (one group-by, one measure) through the time-series pipeline, derived
-// post-aggregation transforms, streak measures, and on to the codec
-// used to persist a query as JSON.
+// post-aggregation transforms, series algebra, streak measures, and on
+// to the codec used to persist a query as JSON.
 //
 // Run from the `example/` directory:
 //
@@ -37,9 +37,19 @@ void main(List<String> args) {
       'Derived operation — cumulative count over time',
       _derivedCumulativeSum,
     ),
-    (8, 'Streak measure — current and longest per habit', _streak),
-    (9, 'Column aliasing with `GroupBy.label`', _columnAliasing),
-    (10, 'Codec — encode a query to JSON and back', _codecRoundtrip),
+    (
+      8,
+      'Calculated measure — profit and margin per region (in-query)',
+      _calculatedMeasure,
+    ),
+    (
+      9,
+      'Series algebra — combine and chain held results (result-level)',
+      _seriesAlgebraHeld,
+    ),
+    (10, 'Streak measure — current and longest per habit', _streak),
+    (11, 'Column aliasing with `GroupBy.label`', _columnAliasing),
+    (12, 'Codec — encode a query to JSON and back', _codecRoundtrip),
   ];
 
   print('═══════════════════════════════════════════════════════════');
@@ -110,6 +120,43 @@ final _events = SourceDef(
       filterable: true,
       groupable: true,
       aggregatable: false,
+      sortable: true,
+    ),
+  ],
+);
+
+final _finance = SourceDef(
+  sourceId: 'finance',
+  displayName: 'Finance',
+  fields: const [
+    FieldDef(
+      sourceId: 'finance',
+      fieldId: 'region',
+      displayName: 'Region',
+      fieldType: FieldType.enumeration,
+      filterable: true,
+      groupable: true,
+      aggregatable: false,
+      sortable: true,
+    ),
+    FieldDef(
+      sourceId: 'finance',
+      fieldId: 'revenue',
+      displayName: 'Revenue',
+      fieldType: FieldType.integer,
+      filterable: true,
+      groupable: false,
+      aggregatable: true,
+      sortable: true,
+    ),
+    FieldDef(
+      sourceId: 'finance',
+      fieldId: 'cost',
+      displayName: 'Cost',
+      fieldType: FieldType.integer,
+      filterable: true,
+      groupable: false,
+      aggregatable: true,
       sortable: true,
     ),
   ],
@@ -197,6 +244,29 @@ List<SourceRecord> _eventRecords() {
 SourceRecord _event(DateTime occurredAt) =>
     SourceRecord(fields: {'occurredAt': DateTimeValue(occurredAt)});
 
+List<SourceRecord> _financeRecords() => [
+  // Two rows per region. Sums per region: north rev 1200 / cost 800;
+  // south rev 900 / cost 950 (a loss); west rev 1500 / cost 600.
+  _finRow('north', revenue: 700, cost: 500),
+  _finRow('north', revenue: 500, cost: 300),
+  _finRow('south', revenue: 400, cost: 500),
+  _finRow('south', revenue: 500, cost: 450),
+  _finRow('west', revenue: 800, cost: 300),
+  _finRow('west', revenue: 700, cost: 300),
+];
+
+SourceRecord _finRow(
+  String region, {
+  required int revenue,
+  required int cost,
+}) => SourceRecord(
+  fields: {
+    'region': EnumValue(region),
+    'revenue': IntValue(revenue),
+    'cost': IntValue(cost),
+  },
+);
+
 List<SourceRecord> _habitRecords() {
   // Two habits over ten days. `morning_run` completed on days 1-5 and
   // 8-10, missed on 6-7 → current streak 3, longest 5. `read` completed
@@ -241,7 +311,7 @@ void _multiMeasure() {
   // One group-by, three measures of different aggregations → the
   // executor produces a MultiMeasureSeriesResult. Labels are left null
   // on each measure so the auto-generated `measure_0..measure_2` rule
-  // applies; explicit labels are demonstrated in section 9.
+  // applies; explicit labels are demonstrated in section 11.
   const priority = FieldRef(sourceId: 'tasks', fieldId: 'priority');
   const estimate = FieldRef(sourceId: 'tasks', fieldId: 'estimateHours');
   final query = AnalyticsQuerySpec(
@@ -383,6 +453,137 @@ void _derivedCumulativeSum() {
   );
 }
 
+void _calculatedMeasure() {
+  // Expression measures compose other measures into one. `profit` is a
+  // CalculatedMeasure folding two field sums with a difference;
+  // `margin` nests that same difference inside a ratio, computing
+  // (revenue − cost) / revenue. Each expression tree counts as exactly
+  // one measure, so the two of them over a single group-by produce an
+  // ordinary MultiMeasureSeriesResult — no new result shape.
+  const revenue = FieldRef(sourceId: 'finance', fieldId: 'revenue');
+  const cost = FieldRef(sourceId: 'finance', fieldId: 'cost');
+  const revenueSum = FieldMeasure(fieldRef: revenue, aggregation: SumAgg());
+  const costSum = FieldMeasure(fieldRef: cost, aggregation: SumAgg());
+
+  final query = AnalyticsQuerySpec(
+    source: 'finance',
+    measures: const [
+      // revenue − cost. Difference of two integer sums stays an integer.
+      CalculatedMeasure(
+        operandA: revenueSum,
+        operandB: costSum,
+        combination: DifferenceCombination(),
+        label: 'profit',
+      ),
+      // (revenue − cost) / revenue. A ratio is always a unitless double,
+      // and operands nest: operandA is itself a CalculatedMeasure.
+      CalculatedMeasure(
+        operandA: CalculatedMeasure(
+          operandA: revenueSum,
+          operandB: costSum,
+          combination: DifferenceCombination(),
+        ),
+        operandB: revenueSum,
+        combination: RatioCombination(),
+        label: 'margin',
+      ),
+    ],
+    groupBys: const [
+      FieldGroupBy(
+        fieldRef: FieldRef(sourceId: 'finance', fieldId: 'region'),
+      ),
+    ],
+  );
+  _runAndPrint(query, _financeRecords(), [_finance]);
+}
+
+void _seriesAlgebraHeld() {
+  // `SeriesAlgebra` (via the `SeriesAlgebraX` extension) operates on a
+  // SeriesResult you already have — no re-query, no re-aggregation. It
+  // does two things a single query spec cannot: combine series from
+  // *different* queries, and chain operations of different families.
+
+  print('Part A: combine two separately-computed series into profit');
+  print('(revenue − cost), aligned by region key.');
+  final revenue = _series(
+    AnalyticsQuerySpec(
+      source: 'finance',
+      measures: const [
+        FieldMeasure(
+          fieldRef: FieldRef(sourceId: 'finance', fieldId: 'revenue'),
+          aggregation: SumAgg(),
+        ),
+      ],
+      groupBys: const [
+        FieldGroupBy(
+          fieldRef: FieldRef(sourceId: 'finance', fieldId: 'region'),
+        ),
+      ],
+    ),
+    _financeRecords(),
+    [_finance],
+  );
+  final cost = _series(
+    AnalyticsQuerySpec(
+      source: 'finance',
+      measures: const [
+        FieldMeasure(
+          fieldRef: FieldRef(sourceId: 'finance', fieldId: 'cost'),
+          aggregation: SumAgg(),
+        ),
+      ],
+      groupBys: const [
+        FieldGroupBy(
+          fieldRef: FieldRef(sourceId: 'finance', fieldId: 'region'),
+        ),
+      ],
+    ),
+    _financeRecords(),
+    [_finance],
+  );
+  if (revenue != null && cost != null) {
+    // Matches the `profit` column from section 8, reached the other way.
+    switch (revenue.combineWith(cost, const DifferenceCombination())) {
+      case Ok(value: final profit):
+        _printResult(profit);
+      case Err(error: final e):
+        print('  combine failed: ${e.humanMessage}');
+    }
+  }
+
+  print('');
+  print('Part B: a running total, then negated — an ordering a single');
+  print('query cannot express (it has one derived-op slot, no post-step).');
+  final daily = _series(
+    AnalyticsQuerySpec(
+      source: 'events',
+      measures: const [CountMeasure()],
+      groupBys: [
+        TimeGroupBy(
+          dateFieldRef: const FieldRef(
+            sourceId: 'events',
+            fieldId: 'occurredAt',
+          ),
+          grain: TimeGrain.day,
+        ),
+      ],
+    ),
+    _eventRecords(),
+    [_events],
+    dateRange: (DateTime(2026, 1, 5), DateTime(2026, 1, 10)),
+  );
+  if (daily != null) {
+    // Each step returns a Result, so they chain through `andThen`
+    // regardless of which operation family they belong to.
+    switch (daily.cumulativeSum().andThen((s) => s.negated())) {
+      case Ok(value: final r):
+        _printResult(r);
+      case Err(error: final e):
+        print('  chain failed: ${e.humanMessage}');
+    }
+  }
+}
+
 void _streak() {
   // StreakMeasure runs its own pipeline (no group-bys allowed) and
   // produces a TableResult with one row per entity, four columns:
@@ -501,6 +702,33 @@ void _runAndPrint(
       _printResult(r);
     case Err(error: final e):
       print('Execution failed: ${e.humanMessage}');
+  }
+}
+
+/// Runs [query] and returns its result as a [SeriesResult], or null when
+/// validation/execution failed or the query produced a different shape.
+/// Used by section 9 to obtain held series to feed into `SeriesAlgebra`.
+SeriesResult? _series(
+  AnalyticsQuerySpec query,
+  List<SourceRecord> records,
+  List<SourceDef> sources, {
+  (DateTime, DateTime)? dateRange,
+}) {
+  final result = AnalyticsExecutor.execute(
+    query: query,
+    records: records,
+    sources: sources,
+    dateRange: dateRange,
+  );
+  switch (result) {
+    case Ok(value: final SeriesResult s):
+      return s;
+    case Ok():
+      print('  query did not produce a series result');
+      return null;
+    case Err(error: final e):
+      print('  query failed: ${e.humanMessage}');
+      return null;
   }
 }
 

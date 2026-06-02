@@ -1,5 +1,6 @@
 import 'equality.dart';
 import 'errors.dart';
+import 'execution/series_numeric.dart';
 import 'infer_result_shape.dart';
 import 'query/measure.dart';
 import 'query/query_components.dart';
@@ -19,6 +20,15 @@ import 'time_series/date_range.dart';
 /// persist or accept user-built widgets should also call
 /// `validateWidgetPayload` before save.
 abstract class QueryValidator {
+  /// Default ceiling on the nesting depth of an expression measure
+  /// ([CalculatedMeasure] / [TransformedMeasure]). Depth counts the
+  /// expression nodes on the longest root-to-leaf path; a leaf measure
+  /// is depth 0. The bound keeps per-bucket evaluation cost on a
+  /// pathological tree bounded. Override it via the `maxExpressionDepth`
+  /// parameter on [validateQuery] / [validateWidgetPayload] (and on
+  /// `AnalyticsExecutor.execute`).
+  static const int defaultMaxExpressionDepth = 8;
+
   // ──────────────────────────────────────────────────────────────────────
   // Top-level entries
   // ──────────────────────────────────────────────────────────────────────
@@ -26,9 +36,14 @@ abstract class QueryValidator {
   /// Validates a single [AnalyticsQuerySpec] against a [sources]
   /// catalog. Returns `Ok(Unit.value)` on success or `Err(AnalyticsError)`
   /// with the first violation encountered.
+  ///
+  /// [maxExpressionDepth] bounds the nesting depth of any expression
+  /// measure; a top-level measure whose tree is deeper is rejected with
+  /// `preconditionViolation`. Defaults to [defaultMaxExpressionDepth].
   static Result<Unit, AnalyticsError> validateQuery(
     AnalyticsQuerySpec query, {
     required List<SourceDef> sources,
+    int maxExpressionDepth = defaultMaxExpressionDepth,
   }) {
     final source = findSourceById(sources, query.source);
     if (source == null) {
@@ -64,8 +79,21 @@ abstract class QueryValidator {
     }
     // Per-measure validation (CountMeasure: always valid; FieldMeasure:
     // field exists / aggregatable / aggregation compatible; StreakMeasure:
-    // fields exist and have the right types / topN is sane).
+    // fields exist and have the right types / topN is sane; expression
+    // measures: operands valid, numeric, and combinable). Expression
+    // nesting depth is bounded first so a pathological tree is rejected
+    // before it is walked.
     for (final m in query.measures) {
+      if (_expressionDepth(m) > maxExpressionDepth) {
+        return Err(
+          AnalyticsError(
+            kind: AnalyticsErrorKind.preconditionViolation,
+            humanMessage:
+                'Expression measure nesting exceeds the maximum depth of '
+                '$maxExpressionDepth.',
+          ),
+        );
+      }
       final r = _validateMeasure(m, source);
       if (r.isErr) return r;
     }
@@ -326,10 +354,15 @@ abstract class QueryValidator {
     required QueryPayload payload,
     required List<SourceDef> sources,
     required DateRangeMode dateRangeMode,
+    int maxExpressionDepth = defaultMaxExpressionDepth,
   }) {
     switch (payload) {
       case SingleQuerySpec(query: final q):
-        final inner = validateQuery(q, sources: sources);
+        final inner = validateQuery(
+          q,
+          sources: sources,
+          maxExpressionDepth: maxExpressionDepth,
+        );
         if (inner.isErr) return inner;
         // Every measure in the query must individually satisfy the
         // date-range cross-rule. In practice the rule is uniform
@@ -345,9 +378,17 @@ abstract class QueryValidator {
         return const Ok(Unit.value);
 
       case PairedQuerySpec(xQuery: final x, yQuery: final y):
-        final xCheck = validateQuery(x, sources: sources);
+        final xCheck = validateQuery(
+          x,
+          sources: sources,
+          maxExpressionDepth: maxExpressionDepth,
+        );
         if (xCheck.isErr) return xCheck;
-        final yCheck = validateQuery(y, sources: sources);
+        final yCheck = validateQuery(
+          y,
+          sources: sources,
+          maxExpressionDepth: maxExpressionDepth,
+        );
         if (yCheck.isErr) return yCheck;
 
         // Both halves must infer to series.
@@ -508,8 +549,91 @@ abstract class QueryValidator {
 
           return const Ok(Unit.value);
         });
+
+      case TransformedMeasure(operand: final operand):
+        if (operand is StreakMeasure) return _streakAsOperand();
+        final operandCheck = _validateMeasure(operand, source);
+        if (operandCheck.isErr) return operandCheck;
+        // Operands are validated above, so outputFieldType resolves
+        // without throwing. A per-value op preserves type and so
+        // requires a numeric operand.
+        final operandType = operand.outputFieldType(source);
+        if (operandType == null || !isNumericFieldType(operandType)) {
+          return _incompatibleCombination(
+            'A per-value operation requires a numeric operand; the '
+            'operand produces a non-numeric value.',
+          );
+        }
+        return const Ok(Unit.value);
+
+      case CalculatedMeasure(
+        operandA: final a,
+        operandB: final b,
+        combination: final combination,
+      ):
+        if (a is StreakMeasure || b is StreakMeasure) {
+          return _streakAsOperand();
+        }
+        final aCheck = _validateMeasure(a, source);
+        if (aCheck.isErr) return aCheck;
+        final bCheck = _validateMeasure(b, source);
+        if (bCheck.isErr) return bCheck;
+        final aType = a.outputFieldType(source);
+        final bType = b.outputFieldType(source);
+        if (aType == null ||
+            !isNumericFieldType(aType) ||
+            bType == null ||
+            !isNumericFieldType(bType)) {
+          return _incompatibleCombination(
+            'Both operands of a calculated measure must be numeric; an '
+            'operand produces a non-numeric value.',
+          );
+        }
+        if (combineOutputType(aType, bType, combination) == null) {
+          return _incompatibleCombination(
+            'These operand types cannot be combined under this '
+            'operation; a sum or difference cannot mix a duration with a '
+            'non-duration.',
+          );
+        }
+        return const Ok(Unit.value);
     }
   }
+
+  /// Longest root-to-leaf count of expression nodes
+  /// ([CalculatedMeasure] / [TransformedMeasure]); a leaf measure is
+  /// depth 0.
+  static int _expressionDepth(Measure measure) {
+    switch (measure) {
+      case CountMeasure():
+      case FieldMeasure():
+      case StreakMeasure():
+        return 0;
+      case TransformedMeasure(operand: final operand):
+        return 1 + _expressionDepth(operand);
+      case CalculatedMeasure(operandA: final a, operandB: final b):
+        final da = _expressionDepth(a);
+        final db = _expressionDepth(b);
+        return 1 + (da > db ? da : db);
+    }
+  }
+
+  static Err<Unit, AnalyticsError> _incompatibleCombination(String message) =>
+      Err(
+        AnalyticsError(
+          kind: AnalyticsErrorKind.incompatibleSeriesCombination,
+          humanMessage: message,
+        ),
+      );
+
+  static Err<Unit, AnalyticsError> _streakAsOperand() => const Err(
+    AnalyticsError(
+      kind: AnalyticsErrorKind.streakNotCombinable,
+      humanMessage:
+          'StreakMeasure cannot be an operand of an expression measure. '
+          'Streak runs its own pipeline and produces a fixed table shape.',
+    ),
+  );
 
   // ──────────────────────────────────────────────────────────────────────
   // Filter

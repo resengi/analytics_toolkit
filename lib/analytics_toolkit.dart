@@ -34,6 +34,13 @@
 ///   sealed `Measure` and `GroupBy` families, `Filter`, `HavingClause`,
 ///   `Sort`, `DerivedOperation`, `AnalyticsQuerySpec`, `QueryPayload`
 ///   (`SingleQuerySpec` / `PairedQuerySpec`)
+/// * **Series operations:** the sealed `ScalarOp` family (`NegateOp` /
+///   `AbsOp` / `FillNullOp`) and `SeriesCombination` family
+///   (`SumCombination` / `DifferenceCombination` / `ProductCombination`
+///   / `RatioCombination`); the `Measure` expression nodes
+///   `TransformedMeasure` and `CalculatedMeasure`; `UnmatchedBucketPolicy`;
+///   and `SeriesAlgebra` (with the `SeriesAlgebraX` extension) for
+///   applying these to a `SeriesResult` already in hand
 /// * **Results:** `AnalyticsResult` (`ScalarResult` / `SeriesResult` /
 ///   `MultiSeriesResult` / `MultiMeasureSeriesResult` / `TableResult`),
 ///   `BucketKey` family (including
@@ -74,6 +81,7 @@ export 'src/changes.dart';
 export 'src/display_spec.dart';
 export 'src/errors.dart';
 export 'src/execution/executor.dart';
+export 'src/execution/series_algebra.dart';
 export 'src/execution/source_record.dart';
 export 'src/infer_result_shape.dart';
 export 'src/query/measure.dart';

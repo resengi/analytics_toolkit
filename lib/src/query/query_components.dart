@@ -394,3 +394,163 @@ class MovingAverageOp extends DerivedOperation {
   @override
   int get hashCode => Object.hash(runtimeType, window);
 }
+
+// ── ScalarOp ────────────────────────────────────────────────────────────────
+
+/// A per-value transformation of a single bucket value.
+///
+/// Sealed typed family. A scalar op maps one numeric value to one
+/// numeric value of the same `FieldType`, independently of any other
+/// bucket — unlike [DerivedOperation], which needs the whole series.
+/// Scalar ops are evaluated per bucket while the value is computed, so
+/// they apply both inside a query (via [TransformedMeasure]) and on a
+/// held result (via `SeriesAlgebra.transform`).
+///
+/// ## Null handling
+///
+/// [NegateOp] and [AbsOp] propagate null: a null value maps to null.
+/// [FillNullOp] is the opt-out — it replaces a null value with a chosen
+/// number and passes a non-null value through unchanged. This is the
+/// only scalar op that turns a null into a number, and it does so only
+/// when the caller asks for it.
+///
+/// ## Output type
+///
+/// All three ops preserve the value's `FieldType`. Negate and absolute
+/// value require a numeric value to operate on; fill-null boxes its
+/// fill into the series' measure type. Applying a scalar op to a
+/// non-numeric series is rejected with
+/// `AnalyticsErrorKind.incompatibleSeriesCombination`.
+sealed class ScalarOp {
+  const ScalarOp();
+}
+
+/// Negates the value: `v` maps to `-v`. Propagates null.
+class NegateOp extends ScalarOp {
+  const NegateOp();
+  @override
+  bool operator ==(Object other) => other is NegateOp;
+  @override
+  int get hashCode => runtimeType.hashCode;
+}
+
+/// Maps the value to its absolute value. Propagates null.
+class AbsOp extends ScalarOp {
+  const AbsOp();
+  @override
+  bool operator ==(Object other) => other is AbsOp;
+  @override
+  int get hashCode => runtimeType.hashCode;
+}
+
+/// Replaces a null value with [fill]; passes a non-null value through
+/// unchanged.
+///
+/// [fill] is boxed into the series' measure type. For a `duration`
+/// series the fill is interpreted in microseconds, so `FillNullOp(0)`
+/// yields `Duration.zero` and a non-zero fill is a microsecond count.
+class FillNullOp extends ScalarOp {
+  const FillNullOp(this.fill);
+
+  /// The number substituted for a null value, boxed into the series'
+  /// measure type.
+  final num fill;
+
+  @override
+  bool operator ==(Object other) => other is FillNullOp && other.fill == fill;
+
+  @override
+  int get hashCode => Object.hash(runtimeType, fill);
+}
+
+// ── SeriesCombination ─────────────────────────────────────────────────────────
+
+/// A binary operation that combines two aligned bucket values into one.
+///
+/// Sealed typed family. A combination folds two numeric values into a
+/// single result. It is the per-bucket rule behind both the in-query
+/// [CalculatedMeasure] (whose operands share the query's buckets, so
+/// they are inherently aligned) and the result-level
+/// `SeriesAlgebra.combine` (which aligns two held series by bucket key
+/// first).
+///
+/// ## Null handling
+///
+/// All combinations propagate null: if either operand value is null,
+/// the result is null. [RatioCombination] additionally yields null when
+/// the denominator is null or zero.
+///
+/// ## Output type
+///
+/// [SumCombination] and [DifferenceCombination] preserve the unit
+/// family: duration with duration yields duration, integer with integer
+/// yields integer, and any pair involving a double yields double;
+/// mixing a duration with a non-duration is rejected.
+/// [ProductCombination] and [RatioCombination] always yield a unitless
+/// double. See `combineOutputType` for the full table.
+sealed class SeriesCombination {
+  const SeriesCombination();
+}
+
+/// Adds the two values: `a + b`.
+class SumCombination extends SeriesCombination {
+  const SumCombination();
+  @override
+  bool operator ==(Object other) => other is SumCombination;
+  @override
+  int get hashCode => runtimeType.hashCode;
+}
+
+/// Subtracts the second value from the first: `a - b`.
+class DifferenceCombination extends SeriesCombination {
+  const DifferenceCombination();
+  @override
+  bool operator ==(Object other) => other is DifferenceCombination;
+  @override
+  int get hashCode => runtimeType.hashCode;
+}
+
+/// Multiplies the two values: `a * b`. Always yields a unitless double.
+class ProductCombination extends SeriesCombination {
+  const ProductCombination();
+  @override
+  bool operator ==(Object other) => other is ProductCombination;
+  @override
+  int get hashCode => runtimeType.hashCode;
+}
+
+/// Divides the first value by the second: `a / b`. Always yields a
+/// unitless double; yields null when the denominator is null or zero.
+class RatioCombination extends SeriesCombination {
+  const RatioCombination();
+  @override
+  bool operator ==(Object other) => other is RatioCombination;
+  @override
+  int get hashCode => runtimeType.hashCode;
+}
+
+// ── UnmatchedBucketPolicy ─────────────────────────────────────────────────────
+
+/// How `SeriesAlgebra.combine` treats a bucket key present in only one
+/// of the two series being combined.
+///
+/// This governs an **absent key** only — a key one series has and the
+/// other lacks. It is unrelated to a **null value** (a present key whose
+/// value is null), which always propagates regardless of policy. The
+/// two are independent: control absent keys with this policy, and null
+/// values with [FillNullOp].
+///
+/// The policy applies only to the result-level combine path. The
+/// in-query [CalculatedMeasure] computes both operands over the same
+/// buckets, so it never has an absent key to resolve.
+enum UnmatchedBucketPolicy {
+  /// Keep only keys present in both series (the intersection). A key
+  /// absent on either side is omitted from the output.
+  drop,
+
+  /// Keep the union of keys. For a key present on only one side, the
+  /// absent side is treated as the combination's identity (zero for sum
+  /// and difference, one for product). A ratio has no identity, so a
+  /// key absent on either side is omitted even under this policy.
+  fillIdentity,
+}

@@ -36,6 +36,17 @@ enum AnalyticsErrorKind {
   /// `FieldType` (e.g. `SumAgg` on a string field).
   incompatibleAggregation,
 
+  /// Two series, or the two operands of a `CalculatedMeasure`, cannot
+  /// be combined: an operand's output is non-numeric, a sum or
+  /// difference was requested across different unit families (e.g. a
+  /// duration and a count), or two series being combined have
+  /// incompatible group dimensions. Also fires for a per-value op
+  /// (`TransformedMeasure` or `SeriesAlgebra.transform`) on a
+  /// non-numeric measure. Parallels [incompatibleAggregation] in spirit
+  /// — the operation is meaningless for the operand types or shapes
+  /// involved.
+  incompatibleSeriesCombination,
+
   /// The selected `FilterOperator` is not valid for the field's
   /// `FieldType` or for the supplied filter value (e.g. `lessThan` on
   /// a boolean field, or `inList` paired with a scalar value).

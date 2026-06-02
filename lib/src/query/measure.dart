@@ -1,4 +1,6 @@
+import '../execution/series_numeric.dart';
 import '../schema/schema.dart';
+import 'query_components.dart';
 
 /// What operation [FieldMeasure] applies to its field's values.
 ///
@@ -247,12 +249,28 @@ class PercentileAgg extends FieldAggregation {
 
 /// What to compute on a group of records.
 ///
-/// Sealed shape with three cases:
+/// Sealed shape. The leaf cases aggregate records directly:
 ///
 /// - [CountMeasure]   — count records
 /// - [FieldMeasure]   — aggregate a numeric or temporal field
 /// - [StreakMeasure]  — compute streak statistics over scheduled vs.
 ///                      completed events per entity
+///
+/// The expression cases compose other measures into a tree, so a single
+/// measure can express an arithmetic combination of fields:
+///
+/// - [TransformedMeasure] — apply a per-value [ScalarOp] to one child
+/// - [CalculatedMeasure]  — combine two children via a
+///                          [SeriesCombination]
+///
+/// An expression node is itself a `Measure`, so the rest of the engine
+/// — result-shape inference, the measure cap, sorting, the derived
+/// operation — treats the whole tree as exactly one measure, which it
+/// is. Leaves produce one value per bucket by aggregation; a per-value
+/// node transforms that value; a binary node folds two children's
+/// values. Because both children of a [CalculatedMeasure] are computed
+/// over the same bucket's records, their values are inherently aligned
+/// and no key matching is needed.
 ///
 /// Every measure carries a [supportsDateRange] capability flag. The
 /// validator enforces that the `dateRangeMode` on the enclosing widget
@@ -299,6 +317,12 @@ sealed class Measure {
   /// - [FieldMeasure] → delegates to
   ///   [FieldAggregation.outputFieldType] using the resolved field's
   ///   `fieldType`.
+  /// - [TransformedMeasure] → the operand's output type (per-value ops
+  ///   preserve type).
+  /// - [CalculatedMeasure] → `combineOutputType` of the two operands'
+  ///   output types under the combination; `null` when the combination
+  ///   is invalid (a non-numeric operand, or a mixed-unit sum or
+  ///   difference).
   /// - [StreakMeasure] → `null`. Streak does not produce a single
   ///   per-bucket aggregated value; it produces a multi-column result
   ///   table (one group-key column for the entity ID, plus three
@@ -326,6 +350,18 @@ sealed class Measure {
           );
         }
         return agg.outputFieldType(field.fieldType);
+      case TransformedMeasure(operand: final operand):
+        return operand.outputFieldType(source);
+      case CalculatedMeasure(
+        operandA: final a,
+        operandB: final b,
+        combination: final combination,
+      ):
+        return combineOutputType(
+          a.outputFieldType(source),
+          b.outputFieldType(source),
+          combination,
+        );
       case StreakMeasure():
         return null;
     }
@@ -516,4 +552,96 @@ class StreakMeasure extends Measure {
     topN,
     label,
   );
+}
+
+/// A per-value transformation of another measure.
+///
+/// Applies the [op] to [operand]'s per-bucket value. The operand is any
+/// measure — a leaf or another expression node — so transforms nest:
+/// `FillNullOp` wrapping a `FieldMeasure` fills that measure's empty
+/// buckets, and a `TransformedMeasure` can itself be an operand of a
+/// [CalculatedMeasure].
+///
+/// The output type equals the operand's output type — every [ScalarOp]
+/// preserves type. The operand must be numeric (the validator rejects a
+/// non-numeric operand with `incompatibleSeriesCombination`).
+class TransformedMeasure extends Measure {
+  const TransformedMeasure({
+    required this.operand,
+    required this.op,
+    super.label,
+  });
+
+  /// The measure whose per-bucket value is transformed.
+  final Measure operand;
+
+  /// The per-value operation applied to each of [operand]'s values.
+  final ScalarOp op;
+
+  @override
+  bool get supportsDateRange => operand.supportsDateRange;
+
+  @override
+  bool operator ==(Object other) =>
+      other is TransformedMeasure &&
+      other.operand == operand &&
+      other.op == op &&
+      other.label == label;
+
+  @override
+  int get hashCode => Object.hash(runtimeType, operand, op, label);
+}
+
+/// A binary combination of two measures into one.
+///
+/// Combines [operandA] and [operandB] per bucket via [combination]. The
+/// operands are held inline (not referenced by label), so a calculated
+/// measure is self-contained: it composes, stands alone, and has no
+/// possibility of a reference cycle. Each operand is any measure, so
+/// calculations nest — `(a - b) / c` is a [CalculatedMeasure] whose
+/// [operandA] is itself a [CalculatedMeasure].
+///
+/// Both operands are computed over the same bucket's records within a
+/// query, so their values are inherently aligned and no key matching is
+/// needed. Combining two series that come from different queries or
+/// groupings is the result-level `SeriesAlgebra.combine` instead.
+///
+/// The output type is `combineOutputType` of the two operands' output
+/// types under [combination]; a non-numeric operand or a mixed-unit sum
+/// or difference makes the combination invalid (the validator rejects
+/// it with `incompatibleSeriesCombination`).
+class CalculatedMeasure extends Measure {
+  const CalculatedMeasure({
+    required this.operandA,
+    required this.operandB,
+    required this.combination,
+    super.label,
+  });
+
+  /// The left operand. For [DifferenceCombination] this is the minuend;
+  /// for [RatioCombination] the numerator.
+  final Measure operandA;
+
+  /// The right operand. For [DifferenceCombination] this is the
+  /// subtrahend; for [RatioCombination] the denominator.
+  final Measure operandB;
+
+  /// How the two operands' per-bucket values are folded.
+  final SeriesCombination combination;
+
+  @override
+  bool get supportsDateRange =>
+      operandA.supportsDateRange && operandB.supportsDateRange;
+
+  @override
+  bool operator ==(Object other) =>
+      other is CalculatedMeasure &&
+      other.operandA == operandA &&
+      other.operandB == operandB &&
+      other.combination == combination &&
+      other.label == label;
+
+  @override
+  int get hashCode =>
+      Object.hash(runtimeType, operandA, operandB, combination, label);
 }

@@ -13,6 +13,7 @@ import 'aggregation_engine.dart';
 import 'derived_engine.dart';
 import 'filter_engine.dart';
 import 'grouping_engine.dart';
+import 'series_numeric.dart';
 import 'source_record.dart';
 
 /// The analytics executor.
@@ -132,6 +133,11 @@ abstract class AnalyticsExecutor {
   /// queries that might produce impractically many buckets (e.g. a
   /// 5-year range at minute grain), the caller should choose a
   /// coarser grain or shorter range upstream.
+  ///
+  /// [maxExpressionDepth] bounds the nesting depth of an expression
+  /// measure ([CalculatedMeasure] / [TransformedMeasure]); it is passed
+  /// to [QueryValidator.validateQuery]. Defaults to
+  /// [QueryValidator.defaultMaxExpressionDepth].
   static Result<AnalyticsResult, AnalyticsError> execute({
     required AnalyticsQuerySpec query,
     required Iterable<SourceRecord> records,
@@ -139,11 +145,15 @@ abstract class AnalyticsExecutor {
     DateTime? asOf,
     (DateTime, DateTime)? dateRange,
     bool densify = true,
+    int maxExpressionDepth = QueryValidator.defaultMaxExpressionDepth,
   }) {
     // Validate.
-    if (QueryValidator.validateQuery(query, sources: sources) case Err(
-      error: final e,
-    )) {
+    if (QueryValidator.validateQuery(
+          query,
+          sources: sources,
+          maxExpressionDepth: maxExpressionDepth,
+        )
+        case Err(error: final e)) {
       return Err(e);
     }
 
@@ -424,7 +434,12 @@ abstract class AnalyticsExecutor {
 
   /// Builds a per-query aggregator closure: a function that maps a
   /// record group to its aggregated value. For [FieldMeasure], the
-  /// field is resolved once here rather than once per bucket.
+  /// field is resolved once here rather than once per bucket. Expression
+  /// measures recurse: a [TransformedMeasure] wraps its operand's
+  /// closure with a per-value op, and a [CalculatedMeasure] folds its
+  /// two operands' closures per group. Because both operand closures run
+  /// over the same group, their values are inherently aligned — no key
+  /// matching.
   ///
   /// Throws `StateError` if the validator's invariants are violated
   /// (unknown field on a FieldMeasure; StreakMeasure routed here).
@@ -446,6 +461,22 @@ abstract class AnalyticsExecutor {
           );
         }
         return (group) => AggregationEngine.aggregateField(group, field, agg);
+      case TransformedMeasure(operand: final operand, op: final op):
+        final inner = _aggregatorFor(operand, source);
+        // The operand is numeric (validated) and scalar ops preserve
+        // type, so this is also the transform's own output type.
+        final type = _resolveMeasureOutputType(operand, source);
+        return (group) => applyScalarValue(op, inner(group), type);
+      case CalculatedMeasure(
+        operandA: final a,
+        operandB: final b,
+        combination: final combination,
+      ):
+        final aggA = _aggregatorFor(a, source);
+        final aggB = _aggregatorFor(b, source);
+        final outType = _resolveMeasureOutputType(measure, source);
+        return (group) =>
+            combinePerValue(aggA(group), aggB(group), combination, outType);
       case StreakMeasure():
         // Unreachable: streak has its own pipeline.
         throw StateError(
